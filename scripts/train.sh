@@ -2,21 +2,18 @@
 # Main training entrypoint: extract sessions → synthesize profile → install
 #
 # Usage:
-#   scripts/train.sh [--max-sessions N] [--dry-run]
+#   scripts/train.sh [--max-sessions N]
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PLUGIN_DIR="$(dirname "$SCRIPT_DIR")"
 TMP_MESSAGES="/tmp/imprint-messages.json"
 PROFILE_PATH="$HOME/.claude/.imprint"
 
-MAX_SESSIONS="${1:-50}"
-DRY_RUN=false
+MAX_SESSIONS="50"
 
 for arg in "$@"; do
     case "$arg" in
-        --dry-run) DRY_RUN=true ;;
         --max-sessions=*) MAX_SESSIONS="${arg#*=}" ;;
     esac
 done

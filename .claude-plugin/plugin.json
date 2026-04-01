@@ -1,6 +1,6 @@
 {
   "name": "imprint",
   "description": "Train a behavioral profile from your Claude session history. Learns your work style, communication preferences, and quality expectations — then injects them into every session.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": { "name": "Nicholas Suski" }
 }

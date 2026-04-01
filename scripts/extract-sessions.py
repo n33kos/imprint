@@ -18,6 +18,7 @@ from pathlib import Path
 SKIP_PREFIXES = [
     "Base directory for this skill",
     "<command",
+    "<local-command",
     "local-command",
     "task-notification",
     "[Request",
@@ -27,7 +28,25 @@ SKIP_PREFIXES = [
     "Shell cwd",
     "MCP error",
     "Continue from where you left off",
+    "[Delegator ",
+    "[Scheduler]",
+    "Successfully reconnected to plugin",
+    "Unknown skill:",
 ]
+
+SKIP_SUBSTRINGS = [
+    "vendor/bundle/ruby",
+    "/code/vendor/",
+    "Traceback (most recent call last)",
+    "node_modules/",
+    "ActionController::",
+    "ActiveRecord::",
+    "ActionDispatch::",
+    "ActiveSupport::",
+]
+
+# Max character length per extracted message — truncate long stacktraces/logs
+MAX_MESSAGE_LENGTH = 3000
 
 
 def _is_genuine_message(text: str) -> bool:
@@ -36,6 +55,9 @@ def _is_genuine_message(text: str) -> bool:
         return False
     for prefix in SKIP_PREFIXES:
         if text.startswith(prefix):
+            return False
+    for substr in SKIP_SUBSTRINGS:
+        if substr in text:
             return False
     return True
 
@@ -56,7 +78,7 @@ def _extract_voice_text(raw: str) -> str | None:
     return None
 
 
-def find_session_files(projects_dir: Path, max_files: int = 50) -> list[Path]:
+def find_session_files(projects_dir: Path, max_files: int = 0) -> list[Path]:
     files = []
     for jsonl in projects_dir.rglob("*.jsonl"):
         try:
@@ -67,7 +89,9 @@ def find_session_files(projects_dir: Path, max_files: int = 50) -> list[Path]:
             continue
 
     files.sort(key=lambda x: (x[1], x[2]), reverse=True)
-    return [f[0] for f in files[:max_files]]
+    if max_files > 0:
+        return [f[0] for f in files[:max_files]]
+    return [f[0] for f in files]
 
 
 def extract_user_messages(session_file: Path) -> list[dict]:
@@ -119,6 +143,9 @@ def extract_user_messages(session_file: Path) -> list[dict]:
                                             texts.append(voice)
 
                 for text in texts:
+                    # Truncate overly long messages (stacktraces, logs, etc.)
+                    if len(text) > MAX_MESSAGE_LENGTH:
+                        text = text[:MAX_MESSAGE_LENGTH] + "... [truncated]"
                     messages.append({
                         "text": text,
                         "project": project,
@@ -135,7 +162,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="Extract user messages from Claude sessions")
     parser.add_argument("--output", required=True, help="Output JSON file path")
-    parser.add_argument("--max-sessions", type=int, default=50, help="Max sessions to scan")
+    parser.add_argument("--max-sessions", type=int, default=0, help="Max sessions to scan (0 = all)")
     args = parser.parse_args()
 
     projects_dir = Path.home() / ".claude" / "projects"

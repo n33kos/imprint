@@ -5,10 +5,11 @@ Synthesize a behavioral profile from extracted session messages.
 Uses `claude --print` for multi-pass LLM synthesis — no API key needed.
 
 Usage:
-    python3 scripts/synthesize-profile.py /tmp/imprint-messages.json [--passes N]
+    python3 scripts/synthesize-profile.py /tmp/imprint-messages.json [--passes N] [--model MODEL]
 """
 
 import json
+import random
 import subprocess
 import sys
 import textwrap
@@ -19,7 +20,16 @@ PROFILE_PATH = Path.home() / ".claude" / ".imprint"
 TEMPLATE_DIR = Path(__file__).parent.parent / "templates"
 
 # Max messages per synthesis batch to stay within context limits
-BATCH_SIZE = 200
+BATCH_SIZE = 150
+
+# Max synthesis passes — merging too many partial profiles degrades quality
+MAX_AUTO_PASSES = 10
+
+# Max message length for synthesis (truncate longer messages)
+MAX_MSG_LEN = 500
+
+# Timeout per claude --print call (seconds)
+CLAUDE_TIMEOUT = 1200
 
 
 def load_messages(input_path: Path) -> dict:
@@ -32,58 +42,84 @@ def load_template() -> str:
     return template_path.read_text()
 
 
+def deduplicate_messages(messages: list[dict]) -> list[dict]:
+    """Deduplicate and truncate messages for cleaner synthesis."""
+    seen = set()
+    cleaned = []
+    for msg in messages:
+        text = msg["text"].strip()
+        if text in seen:
+            continue
+        seen.add(text)
+        if len(text) > MAX_MSG_LEN:
+            text = text[:MAX_MSG_LEN] + "..."
+        cleaned.append({"text": text, "project": msg.get("project", "unknown")})
+    return cleaned
+
+
 def sample_messages(messages: list[dict], batch_size: int = BATCH_SIZE) -> list[list[dict]]:
-    """Split messages into batches, sampling evenly across projects."""
+    """Split messages into batches after shuffling for project diversity."""
     if len(messages) <= batch_size:
         return [messages]
 
-    # Group by project
-    by_project: dict[str, list[dict]] = {}
-    for msg in messages:
-        proj = msg.get("project", "unknown")
-        by_project.setdefault(proj, []).append(msg)
+    random.seed(42)
+    shuffled = list(messages)
+    random.shuffle(shuffled)
 
-    # Sample proportionally from each project
     batches = []
-    remaining = list(messages)
-
-    while remaining:
-        batch = remaining[:batch_size]
-        batches.append(batch)
-        remaining = remaining[batch_size:]
+    for i in range(0, len(shuffled), batch_size):
+        batches.append(shuffled[i:i + batch_size])
 
     return batches
 
 
-def run_synthesis_pass(template: str, messages: list[dict], pass_label: str) -> str:
-    """Run a single synthesis pass using claude --print."""
+def run_synthesis_pass(template: str, messages: list[dict], pass_label: str, model: str) -> str:
+    """Run a single synthesis pass using claude --print with system prompt override."""
     message_text = "\n\n---\n\n".join(
         f"[Project: {m.get('project', 'unknown')}]\n{m['text']}"
         for m in messages
     )
 
-    prompt = f"{template}\n\n## Messages\n\n{message_text}"
-
-    print(f"  Running {pass_label} ({len(messages)} messages)...")
-
-    result = subprocess.run(
-        ["claude", "--print", "-p", prompt],
-        capture_output=True,
-        text=True,
-        timeout=120,
+    system_prompt = template + (
+        "\n\nIMPORTANT: Output a COMPLETE structured behavioral profile with all sections "
+        "filled out. Do NOT summarize or describe what you would do — actually produce the "
+        "full profile document. Each section should have specific, actionable observations "
+        "with supporting evidence."
     )
 
+    user_prompt = f"Here are the user messages to analyze:\n\n{message_text}"
+
+    print(f"  Running {pass_label} ({len(messages)} messages)...", flush=True)
+
+    try:
+        result = subprocess.run(
+            [
+                "claude", "--print",
+                "--model", model,
+                "--system-prompt", system_prompt,
+                "-p", user_prompt,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=CLAUDE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"  TIMEOUT on {pass_label}", file=sys.stderr, flush=True)
+        return ""
+
     if result.returncode != 0:
-        print(f"  Warning: {pass_label} returned code {result.returncode}", file=sys.stderr)
+        print(f"  Warning: {pass_label} returned code {result.returncode}", file=sys.stderr, flush=True)
         if result.stderr:
-            print(f"  stderr: {result.stderr[:200]}", file=sys.stderr)
+            print(f"  stderr: {result.stderr[:300]}", file=sys.stderr, flush=True)
 
-    return result.stdout.strip()
+    out = result.stdout.strip()
+    print(f"  -> {len(out)} chars", flush=True)
+    return out
 
 
-def run_merge_pass(partial_profiles: list[str], metadata: dict) -> str:
+def run_merge_pass(partial_profiles: list[str], metadata: dict, model: str) -> str:
     """Merge multiple partial profiles into a final one."""
-    merge_prompt = textwrap.dedent(f"""\
+    system_prompt = textwrap.dedent(f"""\
         You are merging multiple partial behavioral profiles into a single coherent profile.
 
         Each partial profile was generated from a different batch of the same user's session history.
@@ -98,29 +134,40 @@ def run_merge_pass(partial_profiles: list[str], metadata: dict) -> str:
         - Merge duplicate observations into single stronger statements
         - If a pattern appears in multiple batches, increase confidence
         - Resolve contradictions by favoring the more specific observation
-        - Keep the same section structure (Communication Style, Quality Standards, etc.)
-        - Add a header noting this was auto-generated and can be manually edited
-        - Mark observations with [low confidence] if they only appeared in one batch
+        - Keep the same section structure as the input profiles
         - Start the file with: # User Behavioral Profile
-        - Include a generation metadata line after the title
-
-        ## Partial Profiles
-
+        - Include metadata: > Auto-generated by imprint | {metadata['session_count']} sessions | {metadata['message_count']} messages
+        - Mark observations with [low confidence] if they only appeared in one batch
+        - CRITICAL: Output the FULL merged profile with ALL sections and ALL observations.
+          Do NOT output a summary of changes or describe the merge process.
+          The output must be a complete, standalone behavioral profile document ready to be saved to a file.
     """)
 
+    user_prompt = "## Partial Profiles\n\n"
     for i, profile in enumerate(partial_profiles):
-        merge_prompt += f"### Batch {i + 1}\n\n{profile}\n\n"
+        user_prompt += f"### Batch {i + 1}\n\n{profile}\n\n"
 
-    print(f"  Running merge pass ({len(partial_profiles)} batches)...")
+    print(f"  Running merge pass ({len(partial_profiles)} batches)...", flush=True)
 
-    result = subprocess.run(
-        ["claude", "--print", "-p", merge_prompt],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "claude", "--print",
+                "--model", model,
+                "--system-prompt", system_prompt,
+                "-p", user_prompt,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=CLAUDE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        print("  TIMEOUT on merge pass", file=sys.stderr, flush=True)
+        return ""
 
-    return result.stdout.strip()
+    out = result.stdout.strip()
+    print(f"  -> {len(out)} chars", flush=True)
+    return out
 
 
 def main():
@@ -128,8 +175,14 @@ def main():
 
     parser = argparse.ArgumentParser(description="Synthesize behavioral profile")
     parser.add_argument("input", help="Path to extracted messages JSON")
-    parser.add_argument("--passes", type=int, default=0, help="Override number of passes (0 = auto)")
+    parser.add_argument("--passes", type=int, default=0, help="Override number of passes (0 = auto, capped at %d)" % MAX_AUTO_PASSES)
+    parser.add_argument("--model", default="sonnet", help="Claude model to use (default: sonnet)")
+    parser.add_argument("--timeout", type=int, default=0, help="Timeout per claude --print call in seconds (0 = use default)")
     args = parser.parse_args()
+
+    if args.timeout > 0:
+        global CLAUDE_TIMEOUT
+        CLAUDE_TIMEOUT = args.timeout
 
     input_path = Path(args.input)
     if not input_path.exists():
@@ -143,17 +196,27 @@ def main():
         "message_count": data["message_count"],
     }
 
-    print(f"Loaded {len(messages)} messages from {metadata['session_count']} sessions")
+    print(f"Loaded {len(messages)} messages from {metadata['session_count']} sessions", flush=True)
+
+    # Deduplicate and truncate
+    messages = deduplicate_messages(messages)
+    metadata["message_count"] = len(messages)
+    print(f"After dedup/truncation: {len(messages)} unique messages", flush=True)
+
+    # Remove existing profile to prevent contamination via CLAUDE.md
+    if PROFILE_PATH.exists():
+        PROFILE_PATH.unlink()
+        print("Removed existing profile to prevent contamination", flush=True)
 
     template = load_template()
     batches = sample_messages(messages)
-    num_passes = args.passes if args.passes > 0 else len(batches)
+    num_passes = args.passes if args.passes > 0 else min(len(batches), MAX_AUTO_PASSES)
 
-    print(f"Running {num_passes} synthesis pass(es)...")
+    print(f"Running {num_passes} synthesis pass(es)...", flush=True)
 
     partial_profiles = []
     for i, batch in enumerate(batches[:num_passes]):
-        profile = run_synthesis_pass(template, batch, f"pass {i + 1}/{num_passes}")
+        profile = run_synthesis_pass(template, batch, f"pass {i + 1}/{num_passes}", args.model)
         if profile:
             partial_profiles.append(profile)
 
@@ -163,7 +226,7 @@ def main():
 
     # If multiple batches, merge them
     if len(partial_profiles) > 1:
-        final_profile = run_merge_pass(partial_profiles, metadata)
+        final_profile = run_merge_pass(partial_profiles, metadata, args.model)
     else:
         final_profile = partial_profiles[0]
 
@@ -183,8 +246,8 @@ def main():
 
     PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
     PROFILE_PATH.write_text(final_profile)
-    print(f"\nProfile written to {PROFILE_PATH}")
-    print(f"  Lines: {len(final_profile.splitlines())}")
+    print(f"\nProfile written to {PROFILE_PATH}", flush=True)
+    print(f"  Lines: {len(final_profile.splitlines())}", flush=True)
 
 
 if __name__ == "__main__":

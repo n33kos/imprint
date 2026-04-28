@@ -1,0 +1,16 @@
+{
+  "description": "Inject the trained behavioral profile into every Claude Code session via SessionStart additionalContext",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks-handlers/session-start.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

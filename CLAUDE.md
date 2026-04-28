@@ -1,19 +1,33 @@
-# Imprint — Behavioral Profile
+# CLAUDE.md — Imprint plugin developer notes
 
-This plugin loads a trained behavioral profile that captures the user's work style, communication preferences, and quality expectations.
+This file is **developer documentation** for the imprint plugin source. It is **not** auto-injected into user sessions — Claude Code does not load plugin-level CLAUDE.md files into runtime context.
 
-## Profile Loading
+## How profile injection actually works
 
-Check if the file `~/.claude/.imprint` exists. If it does, read it and internalize its contents as a behavioral guide for this session.
+Profile loading is implemented as a `SessionStart` hook:
 
-The profile describes how this specific user works — their communication style, quality standards, review instincts, domain concerns, and recurring preferences. Adopt these as your own defaults:
+```
+hooks/hooks.json                 # Hook config — fires on every session start
+hooks-handlers/session-start.sh  # Reads ~/.claude/.imprint, emits JSON
+```
 
-- **Communication**: Match the user's preferred level of verbosity, formality, and directness
-- **Quality**: Apply the quality gates and standards the profile describes without being asked
-- **Review**: Follow the review patterns and priorities the user has demonstrated
-- **Domain knowledge**: Factor in the domain-specific concerns and conventions described
-- **Invariants**: Treat "always" and "never" items as hard rules unless the user explicitly overrides them
+The handler emits `hookSpecificOutput.additionalContext` containing the profile, which Claude Code then injects into the session as factual context. This is the only supported mechanism for a plugin to inject persistent instructions into a session.
 
-The profile is not a set of rigid instructions — it's a learned model of how this user prefers to work. Use it to anticipate needs, match expectations, and reduce friction. When in doubt about approach, lean toward whatever the profile suggests the user would prefer.
+## Why not CLAUDE.md?
 
-If `~/.claude/.imprint` does not exist, do nothing — the user hasn't trained a profile yet. They can run `/imprint:train` to generate one.
+Plugin-level CLAUDE.md files are conventionally used as developer documentation (see the slack, devin, notion-mcp plugins). They are not part of the runtime instruction surface. Earlier versions of imprint relied on this file to bootstrap profile loading, but that mechanism does not exist — the plugin was inert until v1.2.0 introduced the SessionStart hook.
+
+## Layout
+
+```
+.claude-plugin/plugin.json   # Plugin manifest
+hooks/hooks.json             # SessionStart hook registration
+hooks-handlers/              # Hook scripts (run as ${CLAUDE_PLUGIN_ROOT}/hooks-handlers/...)
+skills/train/SKILL.md        # /imprint:train skill
+scripts/                     # Training pipeline (extract → synthesize → install)
+templates/                   # Synthesis prompt template
+```
+
+## Profile location
+
+The trained profile lives at `~/.claude/.imprint` — outside the plugin install dir so it survives plugin updates.

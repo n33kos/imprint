@@ -24,7 +24,9 @@ This scans your session history in `~/.claude/projects/`, runs multi-pass LLM sy
 
 ### How it works
 
-Once a profile exists at `~/.claude/.imprint`, the plugin automatically loads it into every Claude session. No manual configuration needed — the plugin's instructions tell Claude to read and adopt the profile.
+Once a profile exists at `~/.claude/.imprint`, the plugin's `SessionStart` hook automatically injects the profile contents into every Claude session as additional context. No manual configuration needed — the hook fires on session start, resume, clear, and compact.
+
+The hook is configured in `hooks/hooks.json` and the handler at `hooks-handlers/session-start.sh` reads `~/.claude/.imprint` and emits its contents via `hookSpecificOutput.additionalContext` — the supported mechanism for plugins to add persistent context to a session.
 
 ### Profile location
 
